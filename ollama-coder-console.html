@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<!--
+  LOCAL INFERENCE CONSOLE — for Ollama + Qwen2.5-Coder (or any local model)
+  Fully self-contained: no external fonts, scripts, or CDN calls.
+  Works completely offline once this file is on disk — it only ever talks
+  to your local Ollama server (default http://localhost:11434).
+
+  SETUP NOTES (read once):
+  1. Run `ollama serve` and `ollama pull qwen2.5-coder:7b` before going offline.
+  2. Browsers block cross-origin requests by default. If this page can't
+     reach Ollama, restart it with CORS opened up:
+       OLLAMA_ORIGINS=* ollama serve
+  3. Open this file directly in a browser (double-click it), or serve it
+     with `python3 -m http.server` from this folder — either works offline.
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Local Inference Console</title>
+<style>
+  :root {
+    --ink: #0a0b0a;
+    --panel: #111312;
+    --line: #262a28;
+    --paper: #e9e7e0;
+    --mute: #74807a;
+    --signal: #ffb454;
+    --fault: #ff5d5d;
+    --ok: #6bd98a;
+    --mono: ui-monospace, "JetBrains Mono", "SF Mono", "IBM Plex Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, "Segoe UI", system-ui, Roboto, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--ink);
+    color: var(--paper);
+    font-family: var(--sans);
+    height: 100vh;
+    overflow: hidden;
+  }
+  button, select, input, textarea { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+
+  button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-visible {
+    outline: 1px solid var(--signal);
+    outline-offset: 2px;
+  }
+
+  .app-shell { display: flex; height: 100vh; }
+
+  /* ---------- corner-bracket signature detail ---------- */
+  .bracketed { position: relative; }
+  .bracketed::before, .bracketed::after {
+    content: ''; position: absolute; width: 9px; height: 9px; pointer-events: none;
+  }
+  .bracketed::before { top: 8px; left: 8px; border-top: 1px solid var(--signal); border-left: 1px solid var(--signal); }
+  .bracketed::after { bottom: 8px; right: 8px; border-bottom: 1px solid var(--signal); border-right: 1px solid var(--signal); }
+
+  /* ---------- left rail (spec sheet / controls) ---------- */
+  .rail {
+    width: 280px; flex-shrink: 0;
+    background: var(--panel); border-right: 1px solid var(--line);
+    display: flex; flex-direction: column; overflow-y: auto;
+  }
+  .rail-header { padding: 20px 16px 16px; border-bottom: 1px solid var(--line); }
+  .wordmark { font-family: var(--mono); font-size: 13px; letter-spacing: 0.12em; text-transform: uppercase; }
+  .wordmark span { color: var(--signal); }
+  .sub-label { font-family: var(--mono); font-size: 10.5px; color: var(--mute); margin-top: 4px; letter-spacing: 0.04em; }
+  .status-row { display: flex; align-items: center; gap: 7px; margin-top: 14px; font-family: var(--mono); font-size: 11px; }
+  .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--mute); flex-shrink: 0; }
+  .status-dot.checking { background: var(--signal); animation: pulse 1s infinite; }
+  .status-dot.online { background: var(--ok); }
+  .status-dot.offline { background: var(--fault); }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+  .status-text { color: var(--mute); }
+  .rail-toggle { display: none; background: none; border: 1px solid var(--line); border-radius: 2px; color: var(--mute); font-family: var(--mono); font-size: 10px; padding: 4px 8px; margin-top: 12px; }
+
+  .field { padding: 14px 16px; border-bottom: 1px solid var(--line); }
+  .field-label {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--mute); margin-bottom: 8px; display: flex; justify-content: space-between; align-items: baseline;
+  }
+  .field-label .icon-btn { background: none; border: none; color: var(--mute); font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; }
+  .field-label .icon-btn:hover { color: var(--signal); }
+
+  .field select, .field input[type="text"], .field input[type="number"], .field textarea {
+    width: 100%; background: var(--ink); border: 1px solid var(--line); color: var(--paper);
+    font-family: var(--mono); font-size: 12.5px; padding: 7px 8px; border-radius: 2px; outline: none;
+  }
+  .field select:focus, .field input:focus, .field textarea:focus { border-color: var(--signal); }
+  .field textarea { resize: vertical; min-height: 64px; line-height: 1.45; }
+  .field input[type="range"] { width: 100%; accent-color: var(--signal); }
+  .range-row { display: flex; align-items: center; gap: 10px; }
+  .range-row input[type="range"] { flex: 1; }
+  .range-readout { font-family: var(--mono); font-size: 11.5px; color: var(--signal); min-width: 32px; text-align: right; }
+  .two-col { display: flex; gap: 10px; }
+  .two-col .field { flex: 1; border-bottom: none; padding: 0; }
+
+  .rail-actions { margin-top: auto; padding: 14px 16px; display: flex; gap: 8px; border-top: 1px solid var(--line); }
+  .btn-ghost {
+    flex: 1; background: transparent; border: 1px solid var(--line); color: var(--mute);
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase;
+    padding: 8px 0; border-radius: 2px;
+  }
+  .btn-ghost:hover { border-color: var(--signal); color: var(--paper); }
+
+  /* ---------- right console (log + composer) ---------- */
+  .console { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .console-head {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 16px 24px; border-bottom: 1px solid var(--line);
+    font-family: var(--mono); font-size: 11.5px; color: var(--mute);
+  }
+  .console-head .model-name { color: var(--paper); }
+  .console-head .metrics { color: var(--signal); }
+
+  .chat-log { flex: 1; overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 20px; }
+  .log-entry { max-width: 740px; }
+  .log-role { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.1em; margin-bottom: 6px; }
+  .role-usr { color: var(--mute); }
+  .role-ast { color: var(--signal); }
+  .log-content { font-size: 14.5px; line-height: 1.65; }
+  .cursor { color: var(--signal); animation: blink 1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  .empty-state {
+    margin: auto; color: var(--mute); font-family: var(--mono); font-size: 12px;
+    letter-spacing: 0.04em; text-align: center;
+  }
+
+  .codeblock { margin: 10px 0; border: 1px solid var(--line); border-radius: 2px; overflow: hidden; }
+  .codeblock-head {
+    display: flex; justify-content: space-between; align-items: center;
+    background: var(--panel); padding: 6px 10px; border-bottom: 1px solid var(--line);
+    font-family: var(--mono); font-size: 10.5px; color: var(--mute);
+  }
+  .copy-btn { background: none; border: 1px solid var(--line); color: var(--mute); font-family: var(--mono); font-size: 10px; padding: 2px 8px; border-radius: 2px; }
+  .copy-btn:hover { border-color: var(--signal); color: var(--signal); }
+  .codeblock pre { margin: 0; padding: 12px 14px; overflow-x: auto; }
+  .codeblock code { font-family: var(--mono); font-size: 12.5px; line-height: 1.55; }
+  .inline-code { font-family: var(--mono); background: var(--panel); border: 1px solid var(--line); padding: 1px 5px; border-radius: 2px; font-size: 0.9em; }
+  .cm-c { color: var(--mute); font-style: italic; }
+  .cm-s { color: #9fd986; }
+  .cm-n { color: #7fb0ff; }
+  .cm-k { color: var(--signal); }
+
+  .composer { border-top: 1px solid var(--line); padding: 14px 24px; display: flex; gap: 10px; align-items: flex-end; }
+  .prompt-caret { font-family: var(--mono); color: var(--signal); font-size: 14px; padding-bottom: 10px; }
+  .composer textarea {
+    flex: 1; background: transparent; border: none; color: var(--paper);
+    font-family: var(--sans); font-size: 14.5px; line-height: 1.5; resize: none; outline: none;
+    max-height: 160px; padding: 8px 0;
+  }
+  .run-btn {
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase;
+    background: var(--signal); color: #1a1300; border: none; padding: 11px 20px; border-radius: 2px;
+  }
+  .run-btn:hover { filter: brightness(1.08); }
+  .run-btn.stop { background: var(--fault); color: #200; }
+  .run-btn:disabled { opacity: 0.35; cursor: default; }
+
+  @media (max-width: 760px) {
+    .app-shell { flex-direction: column; }
+    .rail { width: 100%; max-height: 60vh; border-right: none; border-bottom: 1px solid var(--line); }
+    .rail-toggle { display: inline-block; }
+    body.rail-collapsed .rail { max-height: 0; overflow: hidden; border-bottom: none; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .cursor, .status-dot.checking { animation: none; }
+  }
+</style>
+</head>
+<body>
+
+<div class="app-shell">
+
+  <!-- ======================= LEFT RAIL — SPEC SHEET ======================= -->
+  <aside class="rail">
+    <div class="rail-header bracketed">
+      <div class="wordmark">LOCAL<span>://</span>INFER</div>
+      <div class="sub-label">ollama runtime · offline-capable</div>
+      <div class="status-row">
+        <span id="statusDot" class="status-dot checking"></span>
+        <span id="statusText" class="status-text">CHECKING…</span>
+      </div>
+      <button id="railToggle" class="rail-toggle">COLLAPSE ▾</button>
+    </div>
+
+    <div class="field">
+      <div class="field-label"><span>Endpoint</span></div>
+      <input type="text" id="endpointInput" value="http://localhost:11434">
+    </div>
+
+    <div class="field">
+      <div class="field-label">
+        <span>Model</span>
+        <button class="icon-btn" id="refreshBtn">refresh</button>
+      </div>
+      <select id="modelSelect">
+        <option>detecting…</option>
+      </select>
+    </div>
+
+    <div class="field">
+      <div class="field-label"><span>Temperature</span></div>
+      <div class="range-row">
+        <input type="range" id="temperature" min="0" max="1.5" step="0.05" value="0.2">
+        <span class="range-readout" id="temperatureValue">0.20</span>
+      </div>
+    </div>
+
+    <div class="field">
+      <div class="two-col">
+        <div class="field">
+          <div class="field-label"><span>Max tokens</span></div>
+          <input type="number" id="numPredict" placeholder="−1 (∞)">
+        </div>
+        <div class="field">
+          <div class="field-label"><span>Context</span></div>
+          <input type="number" id="numCtx" value="4096">
+        </div>
+      </div>
+    </div>
+
+    <div class="field" style="border-bottom: none;">
+      <div class="field-label"><span>System prompt</span></div>
+      <textarea id="systemPrompt">You are a precise, no-nonsense coding assistant running fully offline. Give correct, runnable code. Skip preamble and unnecessary explanation unless asked.</textarea>
+    </div>
+
+    <div class="rail-actions">
+      <button class="btn-ghost" id="clearBtn">Clear log</button>
+      <button class="btn-ghost" id="saveBtn">Save log</button>
+    </div>
+  </aside>
+
+  <!-- ======================= RIGHT CONSOLE ======================= -->
+  <main class="console">
+    <div class="console-head bracketed">
+      <span class="model-name" id="readoutModel">—</span>
+      <span class="metrics" id="readoutMetrics">READY</span>
+    </div>
+
+    <div class="chat-log" id="chatLog">
+      <div class="empty-state">LOG EMPTY — send a prompt below to begin.</div>
+    </div>
+
+    <div class="composer">
+      <span class="prompt-caret">›</span>
+      <textarea id="inputBox" rows="1" placeholder="Ask for code, a fix, or an explanation… (Enter to run, Shift+Enter for newline)"></textarea>
+      <button class="run-btn" id="sendBtn">Run</button>
+    </div>
+  </main>
+
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  // ---------------------------------------------------------------------
+  // state
+  // ---------------------------------------------------------------------
+  var conversation = [];
+  var isStreaming = false;
+  var abortController = null;
+  var metricsInterval = null;
+  var streamStartTime = null;
+
+  // ---------------------------------------------------------------------
+  // dom refs
+  // ---------------------------------------------------------------------
+  var chatLogEl = document.getElementById('chatLog');
+  var inputEl = document.getElementById('inputBox');
+  var sendBtn = document.getElementById('sendBtn');
+  var statusDotEl = document.getElementById('statusDot');
+  var statusTextEl = document.getElementById('statusText');
+  var modelSelectEl = document.getElementById('modelSelect');
+  var endpointInputEl = document.getElementById('endpointInput');
+  var temperatureEl = document.getElementById('temperature');
+  var temperatureValueEl = document.getElementById('temperatureValue');
+  var readoutModelEl = document.getElementById('readoutModel');
+  var readoutMetricsEl = document.getElementById('readoutMetrics');
+
+  // ---------------------------------------------------------------------
+  // tiny markdown + syntax highlighter (no external deps, fully offline)
+  // ---------------------------------------------------------------------
+  function escapeHtml(s) {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  var KEYWORDS = ['def','function','return','if','elif','else','for','while','class','import',
+    'from','as','try','except','catch','finally','throw','new','const','let','var','public',
+    'private','protected','static','void','int','float','double','bool','True','False','None',
+    'true','false','null','nullptr','self','this','async','await','fun','val','override',
+    'interface','struct','switch','case','break','continue','lambda','export','default','impl',
+    'fn','match','use','mod','pub'];
+
+  var patternSrc =
+    '(//[^\\n]*)' +
+    '|(#[^\\n]*)' +
+    '|(/\\*[\\s\\S]*?\\*/)' +
+    '|("(?:[^"\\\\]|\\\\.)*")' +
+    "|('(?:[^'\\\\]|\\\\.)*')" +
+    '|(`(?:[^`\\\\]|\\\\.)*`)' +
+    '|(\\b\\d+\\.?\\d*\\b)' +
+    '|\\b(' + KEYWORDS.join('|') + ')\\b';
+  var HIGHLIGHT_RE = new RegExp(patternSrc, 'g');
+
+  function highlightCode(escaped) {
+    return escaped.replace(HIGHLIGHT_RE, function (match, g1, g2, g3, g4, g5, g6, g7, g8) {
+      if (g1 || g2 || g3) return '<span class="cm-c">' + match + '</span>';
+      if (g4 || g5 || g6) return '<span class="cm-s">' + match + '</span>';
+      if (g7) return '<span class="cm-n">' + match + '</span>';
+      if (g8) return '<span class="cm-k">' + match + '</span>';
+      return match;
+    });
+  }
+
+  function inlineMd(escaped) {
+    return escaped
+      .replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>')
+      .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+      .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+      .replace(/\n/g, '<br>');
+  }
+
+  var codeBlockSeq = 0;
+  function renderMarkdown(text) {
+    var fenceRe = /```(\w+)?\n?([\s\S]*?)```/g;
+    var lastIndex = 0, html = '', m;
+    while ((m = fenceRe.exec(text)) !== null) {
+      html += inlineMd(escapeHtml(text.slice(lastIndex, m.index)));
+      var lang = (m[1] || 'text').toLowerCase();
+      var code = m[2].replace(/\n$/, '');
+      var escapedCode = escapeHtml(code);
+      var highlighted = highlightCode(escapedCode);
+      var codeId = 'code-' + (codeBlockSeq++);
+      html += '<div class="codeblock"><div class="codeblock-head"><span>' + lang +
+        '</span><button class="copy-btn" data-target="' + codeId + '">copy</button></div>' +
+        '<pre><code id="' + codeId + '">' + highlighted + '</code></pre></div>';
+      lastIndex = fenceRe.lastIndex;
+    }
+    html += inlineMd(escapeHtml(text.slice(lastIndex)));
+    return html;
+  }
+
+  chatLogEl.addEventListener('click', function (e) {
+    if (e.target.classList.contains('copy-btn')) {
+      var id = e.target.getAttribute('data-target');
+      var codeEl = document.getElementById(id);
+      if (codeEl) {
+        navigator.clipboard.writeText(codeEl.textContent).then(function () {
+          var old = e.target.textContent;
+          e.target.textContent = 'copied';
+          setTimeout(function () { e.target.textContent = old; }, 1200);
+        });
+      }
+    }
+  });
+
+  // ---------------------------------------------------------------------
+  // log rendering
+  // ---------------------------------------------------------------------
+  function appendLogEntry(role, content) {
+    var empty = chatLogEl.querySelector('.empty-state');
+    if (empty) empty.remove();
+    var entry = document.createElement('div');
+    entry.className = 'log-entry';
+    var roleLabel = role === 'user' ? 'USR' : 'AST';
+    var roleClass = role === 'user' ? 'role-usr' : 'role-ast';
+    entry.innerHTML = '<div class="log-role ' + roleClass + '">' + roleLabel + '</div><div class="log-content"></div>';
+    chatLogEl.appendChild(entry);
+    var contentEl = entry.querySelector('.log-content');
+    contentEl.innerHTML = role === 'user' ? inlineMd(escapeHtml(content)) : renderMarkdown(content);
+    chatLogEl.scrollTop = chatLogEl.scrollHeight;
+    return contentEl;
+  }
+
+  // ---------------------------------------------------------------------
+  // connection + model discovery
+  // ---------------------------------------------------------------------
+  function getBaseUrl() {
+    var v = endpointInputEl.value.trim();
+    return (v ? v : 'http://localhost:11434').replace(/\/$/, '');
+  }
+
+  function setStatus(state, text) {
+    statusDotEl.className = 'status-dot ' + state;
+    statusTextEl.textContent = text;
+  }
+
+  function checkConnection() {
+    setStatus('checking', 'CHECKING…');
+    return fetch(getBaseUrl() + '/api/tags')
+      .then(function (res) {
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return res.json();
+      })
+      .then(function (data) {
+        setStatus('online', 'CONNECTED');
+        return data.models || [];
+      })
+      .catch(function () {
+        setStatus('offline', 'OFFLINE — start `ollama serve`');
+        return null;
+      });
+  }
+
+  function refreshModels() {
+    return checkConnection().then(function (models) {
+      modelSelectEl.innerHTML = '';
+      if (!models || models.length === 0) {
+        var opt = document.createElement('option');
+        opt.value = 'qwen2.5-coder:7b';
+        opt.textContent = 'qwen2.5-coder:7b (unverified)';
+        modelSelectEl.appendChild(opt);
+        readoutModelEl.textContent = opt.value;
+        return;
+      }
+      models.forEach(function (mdl) {
+        var opt = document.createElement('option');
+        opt.value = mdl.name;
+        var size = mdl.details && mdl.details.parameter_size ? ' · ' + mdl.details.parameter_size : '';
+        opt.textContent = mdl.name + size;
+        modelSelectEl.appendChild(opt);
+      });
+      var preferred = models.find(function (mdl) { return mdl.name.toLowerCase().indexOf('qwen2.5-coder') !== -1; }) ||
+                       models.find(function (mdl) { return mdl.name.toLowerCase().indexOf('qwen') !== -1; });
+      modelSelectEl.value = preferred ? preferred.name : models[0].name;
+      readoutModelEl.textContent = modelSelectEl.value;
+    });
+  }
+
+  // ---------------------------------------------------------------------
+  // live readout (tok/s, elapsed)
+  // ---------------------------------------------------------------------
+  function startMetrics() {
+    streamStartTime = performance.now();
+    metricsInterval = setInterval(tickMetrics, 200);
+    tickMetrics();
+  }
+  function tickMetrics() {
+    var elapsed = ((performance.now() - streamStartTime) / 1000).toFixed(1);
+    readoutMetricsEl.textContent = 'generating… ' + elapsed + 's';
+  }
+  function stopMetrics(finalStats) {
+    if (metricsInterval) clearInterval(metricsInterval);
+    metricsInterval = null;
+    if (finalStats && finalStats.eval_count && finalStats.eval_duration) {
+      var tps = (finalStats.eval_count / (finalStats.eval_duration / 1e9)).toFixed(1);
+      var totalS = (finalStats.total_duration / 1e9).toFixed(1);
+      readoutMetricsEl.textContent = tps + ' tok/s · ' + finalStats.eval_count + ' tok · ' + totalS + 's total';
+    } else {
+      readoutMetricsEl.textContent = 'READY';
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // send / stream
+  // ---------------------------------------------------------------------
+  function setStreamingUI(streaming) {
+    isStreaming = streaming;
+    sendBtn.textContent = streaming ? 'Stop' : 'Run';
+    sendBtn.classList.toggle('stop', streaming);
+  }
+
+  function autoResize(el) {
+    el.style.height = 'auto';
+    el.style.height = Math.min(el.scrollHeight, 160) + 'px';
+  }
+
+  function handleSendOrStop() {
+    if (isStreaming) {
+      if (abortController) abortController.abort();
+      return;
+    }
+    var text = inputEl.value.trim();
+    if (!text) return;
+
+    conversation.push({ role: 'user', content: text });
+    appendLogEntry('user', text);
+    inputEl.value = '';
+    autoResize(inputEl);
+
+    var sysPrompt = document.getElementById('systemPrompt').value.trim();
+    var temperature = parseFloat(temperatureEl.value);
+    var numPredictRaw = document.getElementById('numPredict').value.trim();
+    var numPredict = numPredictRaw === '' ? -1 : parseInt(numPredictRaw, 10);
+    var numCtxRaw = document.getElementById('numCtx').value.trim();
+    var numCtx = numCtxRaw === '' ? 4096 : parseInt(numCtxRaw, 10);
+    var model = modelSelectEl.value;
+
+    var messages = [];
+    if (sysPrompt) messages.push({ role: 'system', content: sysPrompt });
+    messages = messages.concat(conversation);
+
+    conversation.push({ role: 'assistant', content: '' });
+    var assistantEl = appendLogEntry('assistant', '');
+    assistantEl.innerHTML = '<span class="cursor">▌</span>';
+
+    setStreamingUI(true);
+    startMetrics();
+    abortController = new AbortController();
+
+    fetch(getBaseUrl() + '/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: model,
+        messages: messages,
+        stream: true,
+        options: { temperature: temperature, num_predict: numPredict, num_ctx: numCtx }
+      }),
+      signal: abortController.signal
+    })
+    .then(function (res) {
+      if (!res.ok || !res.body) throw new Error('request failed (' + res.status + ')');
+      var reader = res.body.getReader();
+      var decoder = new TextDecoder();
+      var buffer = '';
+
+      function pump() {
+        return reader.read().then(function (result) {
+          if (result.done) return;
+          buffer += decoder.decode(result.value, { stream: true });
+          var lines = buffer.split('\n');
+          buffer = lines.pop();
+          for (var i = 0; i < lines.length; i++) {
+            var line = lines[i];
+            if (!line.trim()) continue;
+            var json;
+            try { json = JSON.parse(line); } catch (e) { continue; }
+            if (json.message && typeof json.message.content === 'string') {
+              conversation[conversation.length - 1].content += json.message.content;
+              assistantEl.innerHTML = renderMarkdown(conversation[conversation.length - 1].content) + '<span class="cursor">▌</span>';
+              chatLogEl.scrollTop = chatLogEl.scrollHeight;
+            }
+            if (json.done) stopMetrics(json);
+          }
+          return pump();
+        });
+      }
+      return pump();
+    })
+    .catch(function (err) {
+      if (err.name !== 'AbortError') {
+        conversation[conversation.length - 1].content += '\n\n[connection error: ' + err.message + ']';
+      }
+    })
+    .then(function () {
+      assistantEl.innerHTML = renderMarkdown(conversation[conversation.length - 1].content);
+      setStreamingUI(false);
+      stopMetrics();
+      abortController = null;
+    });
+  }
+
+  // ---------------------------------------------------------------------
+  // wiring
+  // ---------------------------------------------------------------------
+  sendBtn.addEventListener('click', handleSendOrStop);
+  inputEl.addEventListener('input', function () { autoResize(inputEl); });
+  inputEl.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSendOrStop();
+    }
+  });
+
+  temperatureEl.addEventListener('input', function (e) {
+    temperatureValueEl.textContent = parseFloat(e.target.value).toFixed(2);
+  });
+  modelSelectEl.addEventListener('change', function (e) {
+    readoutModelEl.textContent = e.target.value;
+  });
+  endpointInputEl.addEventListener('change', refreshModels);
+  document.getElementById('refreshBtn').addEventListener('click', refreshModels);
+
+  document.getElementById('clearBtn').addEventListener('click', function () {
+    if (isStreaming) return;
+    conversation = [];
+    chatLogEl.innerHTML = '<div class="empty-state">LOG EMPTY — send a prompt below to begin.</div>';
+  });
+
+  document.getElementById('saveBtn').addEventListener('click', function () {
+    if (conversation.length === 0) return;
+    var lines = conversation.map(function (m) {
+      return '**' + m.role.toUpperCase() + ':**\n\n' + m.content + '\n';
+    });
+    var blob = new Blob([lines.join('\n---\n\n')], { type: 'text/markdown' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'inference-log-' + Date.now() + '.md';
+    a.click();
+    URL.revokeObjectURL(url);
+  });
+
+  document.getElementById('railToggle').addEventListener('click', function () {
+    document.body.classList.toggle('rail-collapsed');
+  });
+
+  // ---------------------------------------------------------------------
+  // init
+  // ---------------------------------------------------------------------
+  refreshModels();
+})();
+</script>
+</body>
+</html>
